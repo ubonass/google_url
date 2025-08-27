@@ -1,3 +1,7 @@
+// Copyright 2025 The Chromium Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
 #ifndef POLYFILLS_BASE_ALLOCATOR_BUILDFLAGS_H_
 #define POLYFILLS_BASE_ALLOCATOR_BUILDFLAGS_H_
 
