@@ -7,8 +7,8 @@
 
 #define BASE_DECLARE_FEATURE(feature) extern const gurl_base::Feature feature
 
-#define BASE_FEATURE(feature, name, default_value) \
-  const gurl_base::Feature feature(name, default_value)
+#define BASE_FEATURE(feature, default_value) \
+  const gurl_base::Feature feature(#feature, default_value)
 
 namespace gurl_base {
 

@@ -1,8 +1,9 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
 # Copyright 2019 The Chromium Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 load("//build_config:build_config.bzl", "build_config")
-load("@rules_cc//cc:defs.bzl", "cc_library")
 
 cc_library(
     name = "base",
@@ -10,9 +11,9 @@ cc_library(
         "debug/crash_logging.cc",
         "strings/string_util.cc",
         "strings/string_util_constants.cc",
+        "strings/utf_ostream_operators.cc",
         "strings/utf_string_conversion_utils.cc",
         "strings/utf_string_conversions.cc",
-        "strings/utf_ostream_operators.cc",
     ] + select({
         "//build_config:windows_x86_64": ["strings/string_util_win.cc"],
         "//conditions:default": [],
@@ -22,21 +23,18 @@ cc_library(
         "compiler_specific.h",
         "containers/checked_iterators.h",
         "containers/contains.h",
-        "containers/contiguous_iterator.h",
         "containers/span.h",
-        "containers/util.h",
-        "cxx20_is_constant_evaluated.h",
+        "containers/span_forward_internal.h",
         "debug/crash_logging.h",
         "debug/leak_annotations.h",
-        "functional/identity.h",
-        "functional/invoke.h",
-        "functional/not_fn.h",
         "memory/raw_ptr_exclusion.h",
+        "memory/stack_allocated.h",
         "no_destructor.h",
         "numerics/checked_math.h",
         "numerics/checked_math_impl.h",
         "numerics/clamped_math.h",
         "numerics/clamped_math_impl.h",
+        "numerics/integral_constant_like.h",
         "numerics/safe_conversions.h",
         "numerics/safe_conversions_arm_impl.h",
         "numerics/safe_conversions_impl.h",
@@ -44,21 +42,16 @@ cc_library(
         "numerics/safe_math_arm_impl.h",
         "numerics/safe_math_clang_gcc_impl.h",
         "numerics/safe_math_shared_impl.h",
-        "ranges/algorithm.h",
-        "ranges/functional.h",
-        "ranges/ranges.h",
         "stl_util.h",
-        "template_util.h",
-        "types/always_false.h",
-        "types/supports_ostream_operator.h",
-        "strings/string_piece.h",
+        "strings/string_number_conversions.h",
         "strings/string_util.h",
         "strings/string_util_impl_helpers.h",
         "strings/string_util_internal.h",
-        "strings/string_number_conversions.h",
-        "strings/utf_string_conversions.h",
         "strings/utf_ostream_operators.h",
         "strings/utf_string_conversion_utils.h",
+        "strings/utf_string_conversions.h",
+        "types/supports_ostream_operator.h",
+        "types/to_address.h",
         "win/win_handle_types.h",
     ] + build_config.strings_hdrs,
     copts = build_config.default_copts,

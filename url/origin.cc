@@ -7,6 +7,7 @@
 #include <stdint.h>
 
 #include <algorithm>
+#include <compare>
 #include <ostream>
 #include <string>
 #include <string_view>
@@ -16,17 +17,19 @@
 #include "base/base64.h"
 #include "polyfills/base/check.h"
 #include "polyfills/base/check_op.h"
+#include "base/compiler_specific.h"
 #include "base/containers/contains.h"
 #include "base/containers/span.h"
 #include "base/debug/crash_logging.h"
 #include "base/pickle.h"
 #include "base/strings/strcat.h"
-#include "polyfills/third_party/perfetto/include/perfetto/tracing/traced_value.h"
 #include "polyfills/base/trace_event/memory_usage_estimator.h"
+#include "polyfills/third_party/perfetto/include/perfetto/tracing/traced_value.h"
 #include "base/unguessable_token.h"
 #include "url/gurl.h"
 #include "url/scheme_host_port.h"
 #include "url/url_constants.h"
+#include "url/url_features.h"
 #include "url/url_util.h"
 
 namespace url {
@@ -53,7 +56,7 @@ Origin Origin::Create(const GURL& url) {
     // It's SchemeHostPort's responsibility to filter out unrecognized schemes;
     // sanity check that this is happening.
     GURL_DCHECK(!tuple.IsValid() || url.IsStandard() ||
-           gurl_base::Contains(GetLocalSchemes(), url.scheme_piece()) ||
+           gurl_base::Contains(GetLocalSchemes(), url.scheme()) ||
            AllowNonStandardSchemesForAndroidWebView());
   }
 
@@ -160,7 +163,7 @@ const gurl_base::UnguessableToken* Origin::GetNonceForSerialization() const {
 bool Origin::IsSameOriginWith(const Origin& other) const {
   // scheme/host/port must match, even for opaque origins where |tuple_| holds
   // the precursor origin.
-  return std::tie(tuple_, nonce_) == std::tie(other.tuple_, other.nonce_);
+  return *this == other;
 }
 
 bool Origin::IsSameOriginWith(const GURL& url) const {
@@ -183,7 +186,7 @@ bool Origin::CanBeDerivedFrom(const GURL& url) const {
   // For "no access" schemes, blink's SecurityOrigin will always create an
   // opaque unique one. However, about: scheme is also registered as such but
   // does not behave this way, therefore exclude it from this check.
-  if (gurl_base::Contains(url::GetNoAccessSchemes(), url.scheme()) &&
+  if (gurl_base::Contains(url::GetNoAccessSchemes(), url.GetScheme()) &&
       !url.SchemeIs(kAboutScheme)) {
     // If |this| is not opaque, definitely return false as the expectation
     // is for opaque origin.
@@ -203,8 +206,8 @@ bool Origin::CanBeDerivedFrom(const GURL& url) const {
   // origin can always create an opaque tuple origin.
   if (url.IsStandard()) {
     // Note: if extra copies of the scheme and host are undesirable, this check
-    // can be implemented using StringPiece comparisons, but it has to account
-    // explicitly checks on port numbers.
+    // can be implemented using std::string_view comparisons, but it has to
+    // account explicitly checks on port numbers.
     if (url.SchemeIsFileSystem()) {
       url_tuple = SchemeHostPort(*url.inner_url());
     } else {
@@ -245,20 +248,20 @@ bool Origin::CanBeDerivedFrom(const GURL& url) const {
   if (!tuple_.IsValid())
     return true;
 
-  // However, when there is precursor present, the schemes must match.
-  return url.scheme() == tuple_.scheme();
+  // However, when there is precursor present, that must match.
+  return SchemeHostPort(url) == tuple_;
 }
 
 bool Origin::DomainIs(std::string_view canonical_domain) const {
   return !opaque() && url::DomainIs(tuple_.host(), canonical_domain);
 }
 
-bool Origin::operator<(const Origin& other) const {
-  return std::tie(tuple_, nonce_) < std::tie(other.tuple_, other.nonce_);
-}
-
 Origin Origin::DeriveNewOpaqueOrigin() const {
   return Origin(Nonce(), tuple_);
+}
+
+const gurl_base::UnguessableToken* Origin::GetNonceForTesting() const {
+  return GetNonceForSerialization();
 }
 
 std::string Origin::GetDebugString(bool include_nonce) const {
@@ -332,18 +335,20 @@ std::optional<std::string> Origin::SerializeWithNonceImpl() const {
     pickle.WriteUInt64(0);
   }
 
-  gurl_base::span<const uint8_t> data(static_cast<const uint8_t*>(pickle.data()),
-                                 pickle.size());
+  gurl_base::span<const uint8_t> UNSAFE_TODO(
+      data(static_cast<const uint8_t*>(pickle.data()), pickle.size()));
   // Base64 encode the data to make it nicer to play with.
   return gurl_base::Base64Encode(data);
 }
 
 // static
-std::optional<Origin> Origin::Deserialize(const std::string& value) {
+std::optional<Origin> Origin::Deserialize(std::string_view value) {
   std::string data;
   if (!gurl_base::Base64Decode(value, &data))
     return std::nullopt;
-  gurl_base::Pickle pickle(reinterpret_cast<char*>(&data[0]), data.size());
+
+  gurl_base::Pickle pickle =
+      gurl_base::Pickle::WithUnownedBuffer(gurl_base::as_byte_span(data));
   gurl_base::PickleIterator reader(pickle);
 
   std::string pickled_url;
@@ -453,10 +458,11 @@ Origin::Nonce& Origin::Nonce::operator=(Origin::Nonce&& other) noexcept {
   return *this;
 }
 
-bool Origin::Nonce::operator<(const Origin::Nonce& other) const {
+std::strong_ordering Origin::Nonce::operator<=>(
+    const Origin::Nonce& other) const {
   // When comparing, lazy-generation is required of both tokens, so that an
   // ordering is established.
-  return token() < other.token();
+  return token() <=> other.token();
 }
 
 bool Origin::Nonce::operator==(const Origin::Nonce& other) const {
@@ -465,23 +471,5 @@ bool Origin::Nonce::operator==(const Origin::Nonce& other) const {
   // object.
   return (other.token_ == token_) && !(token_.is_empty() && (&other != this));
 }
-
-bool Origin::Nonce::operator!=(const Origin::Nonce& other) const {
-  return !(*this == other);
-}
-
-namespace debug {
-
-ScopedOriginCrashKey::ScopedOriginCrashKey(
-    gurl_base::debug::CrashKeyString* crash_key,
-    const url::Origin* value)
-    : scoped_string_value_(
-          crash_key,
-          value ? value->GetDebugString(false /* include_nonce */)
-                : "nullptr") {}
-
-ScopedOriginCrashKey::~ScopedOriginCrashKey() = default;
-
-}  // namespace debug
 
 }  // namespace url

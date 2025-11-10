@@ -11,7 +11,6 @@ cc_library(
         "base/check.h",
         "base/check_op.h",
         "base/component_export.h",
-        "base/cpu_reduction_experiment.h",
         "base/dcheck_is_on.h",
         "base/debug/alias.h",
         "base/export_template.h",

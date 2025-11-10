@@ -2,13 +2,23 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#ifdef UNSAFE_BUFFERS_BUILD
+// TODO(crbug.com/350788890): Remove this and spanify to fix the errors.
+#pragma allow_unsafe_buffers
+#endif
+
 #include "url/url_canon.h"
 
 #include <errno.h>
 #include <stddef.h>
+
+#include <array>
+#include <optional>
 #include <string_view>
 
+#include "base/containers/span.h"
 #include "base/strings/string_number_conversions.h"
+#include "base/strings/string_view_util.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/test/gtest_util.h"
 #include "base/test/scoped_feature_list.h"
@@ -22,6 +32,13 @@
 namespace url {
 
 namespace {
+
+// Struct to hold test cases for StringToUint64WithBase function.
+struct StringToUint64TestCase {
+  std::string_view input;
+  uint8_t base;
+  uint64_t expected;
+};
 
 struct ComponentCase {
   const char* input;
@@ -93,9 +110,85 @@ void SetupReplComp(
   }
 }
 
+bool CanonicalizeSpecialPath(std::optional<std::string_view> path,
+                             CanonOutput* output,
+                             Component* out_path) {
+  return CanonicalizePath(path, CanonMode::kSpecialURL, output, out_path);
+}
+
+bool CanonicalizeSpecialPath(std::optional<std::u16string_view> path,
+                             CanonOutput* output,
+                             Component* out_path) {
+  return CanonicalizePath(path, CanonMode::kSpecialURL, output, out_path);
+}
+
+bool CanonicalizeNonSpecialPath(std::optional<std::string_view> path,
+                                CanonOutput* output,
+                                Component* out_path) {
+  return CanonicalizePath(path, CanonMode::kNonSpecialURL, output, out_path);
+}
+
+bool CanonicalizeNonSpecialPath(std::optional<std::u16string_view> path,
+                                CanonOutput* output,
+                                Component* out_path) {
+  return CanonicalizePath(path, CanonMode::kNonSpecialURL, output, out_path);
+}
+
 }  // namespace
 
-TEST(URLCanonTest, DoAppendUTF8) {
+class URLCanonTest : public ::testing::Test {
+ public:
+  URLCanonTest() {
+    scoped_feature_list_.InitAndEnableFeature(
+        url::kDisallowSpaceCharacterInURLHostParsing);
+  }
+
+ protected:
+  struct ResolveRelativeURLCase {
+    const std::string_view base;
+    const std::string_view rel;
+    const bool is_base_hier;
+    const bool expected_base_is_valid;
+    const bool expected_is_relative;
+    const bool expected_succeed_resolve;
+    const std::string_view expected_resolved_url;
+  };
+
+  void TestNonSpecialResolveRelativeURL(
+      const ResolveRelativeURLCase& relative_case) {
+    // The following test is similar to URLCanonTest::ResolveRelativeURL, but
+    // simplified.
+    Parsed parsed = ParseNonSpecialUrl(relative_case.base);
+
+    // First see if it is relative.
+    bool is_relative;
+    Component relative_component;
+    bool succeed_is_rel = IsRelativeUrl(
+        relative_case.base, parsed, relative_case.rel,
+        relative_case.is_base_hier, &is_relative, &relative_component);
+
+    EXPECT_EQ(is_relative, relative_case.expected_is_relative);
+    if (succeed_is_rel && is_relative) {
+      std::string resolved_url;
+      StdStringCanonOutput output(&resolved_url);
+      Parsed resolved_parsed;
+
+      bool succeed_resolve = ResolveRelativeUrl(
+          relative_case.base, parsed, relative_case.is_base_hier,
+          relative_case.rel, relative_component, nullptr, &output,
+          &resolved_parsed);
+      output.Complete();
+
+      EXPECT_EQ(succeed_resolve, relative_case.expected_succeed_resolve);
+      EXPECT_EQ(resolved_url, relative_case.expected_resolved_url);
+    }
+  }
+
+ private:
+  gurl_base::test::ScopedFeatureList scoped_feature_list_;
+};
+
+TEST_F(URLCanonTest, DoAppendUTF8) {
   struct UTF8Case {
     unsigned input;
     const char* output;
@@ -117,7 +210,7 @@ TEST(URLCanonTest, DoAppendUTF8) {
   }
 }
 
-TEST(URLCanonTest, DoAppendUTF8Invalid) {
+TEST_F(URLCanonTest, DoAppendUTF8Invalid) {
   std::string out_str;
   StdStringCanonOutput output(&out_str);
   // Invalid code point (too large).
@@ -127,7 +220,7 @@ TEST(URLCanonTest, DoAppendUTF8Invalid) {
   });
 }
 
-TEST(URLCanonTest, UTF) {
+TEST_F(URLCanonTest, UTF) {
   // Low-level test that we handle reading, canonicalization, and writing
   // UTF-8/UTF-16 strings properly.
   struct UTFCase {
@@ -207,7 +300,7 @@ TEST(URLCanonTest, UTF) {
   }
 }
 
-TEST(URLCanonTest, Scheme) {
+TEST_F(URLCanonTest, Scheme) {
   // Here, we're mostly testing that unusual characters are handled properly.
   // The canonicalizer doesn't do any parsing or whitespace detection. It will
   // also do its best on error, and will escape funny sequences (these won't be
@@ -237,8 +330,8 @@ TEST(URLCanonTest, Scheme) {
 
     out_str.clear();
     StdStringCanonOutput output1(&out_str);
-    bool success =
-        CanonicalizeScheme(scheme_case.input, in_comp, &output1, &out_comp);
+    bool success = CanonicalizeScheme(
+        in_comp.as_string_view_on(scheme_case.input), &output1, &out_comp);
     output1.Complete();
 
     EXPECT_EQ(scheme_case.expected_success, success);
@@ -252,8 +345,8 @@ TEST(URLCanonTest, Scheme) {
 
     std::u16string wide_input(gurl_base::UTF8ToUTF16(scheme_case.input));
     in_comp.len = static_cast<int>(wide_input.length());
-    success = CanonicalizeScheme(wide_input.c_str(), in_comp, &output2,
-                                 &out_comp);
+    success =
+        CanonicalizeScheme(in_comp.AsViewOn(wide_input), &output2, &out_comp);
     output2.Complete();
 
     EXPECT_EQ(scheme_case.expected_success, success);
@@ -268,7 +361,8 @@ TEST(URLCanonTest, Scheme) {
   out_str.clear();
   StdStringCanonOutput output(&out_str);
 
-  EXPECT_FALSE(CanonicalizeScheme("", Component(0, -1), &output, &out_comp));
+  EXPECT_FALSE(CanonicalizeScheme(std::optional<std::string_view>(std::nullopt),
+                                  &output, &out_comp));
   output.Complete();
 
   EXPECT_EQ(":", out_str);
@@ -276,49 +370,32 @@ TEST(URLCanonTest, Scheme) {
   EXPECT_EQ(0, out_comp.len);
 }
 
-// IDNA mode to use in CanonHost tests.
-enum class IDNAMode { kTransitional, kNonTransitional };
-
-class URLCanonHostTest
-    : public ::testing::Test,
-      public ::testing::WithParamInterface<IDNAMode> {
+class URLCanonHostTest : public ::testing::Test {
  public:
   URLCanonHostTest() {
-    if (GetParam() == IDNAMode::kNonTransitional) {
-      scoped_feature_list_.InitAndEnableFeature(kUseIDNA2008NonTransitional);
-    } else {
-      scoped_feature_list_.InitAndDisableFeature(kUseIDNA2008NonTransitional);
-    }
+    scoped_feature_list_.InitAndEnableFeature(
+        kDisallowSpaceCharacterInURLHostParsing);
   }
 
  private:
   gurl_base::test::ScopedFeatureList scoped_feature_list_;
 };
 
-INSTANTIATE_TEST_SUITE_P(All,
-                         URLCanonHostTest,
-                         ::testing::Values(IDNAMode::kTransitional,
-                                           IDNAMode::kNonTransitional));
-
-TEST_P(URLCanonHostTest, Host) {
-  bool use_idna_non_transitional = IsUsingIDNA2008NonTransitional();
-
+TEST_F(URLCanonHostTest, Host) {
   // clang-format off
   IPAddressCase host_cases[] = {
       // Basic canonicalization, uppercase should be converted to lowercase.
       {"GoOgLe.CoM", L"GoOgLe.CoM", "google.com", Component(0, 10),
        CanonHostInfo::NEUTRAL, -1, ""},
-      // TODO(https://crbug.com/1416013): Update the test after SPACE is
-      // correctly handled.
       {"Goo%20 goo.com", L"Goo%20 goo.com", "goo%20%20goo.com",
-       Component(0, 16), CanonHostInfo::NEUTRAL, -1, ""},
-      // TODO(https://crbug.com/1416013): Update the test after ASTERISK is
+       Component(0, 16), CanonHostInfo::BROKEN, -1, ""},
+      // TODO(crbug.com/40256677): Update the test after ASTERISK is
       // correctly handled.
       {"Goo%2a*goo.com", L"Goo%2a*goo.com", "goo%2A%2Agoo.com",
        Component(0, 16), CanonHostInfo::NEUTRAL, -1, ""},
       // Exciting different types of spaces!
       {nullptr, L"GOO\x00a0\x3000goo.com", "goo%20%20goo.com", Component(0, 16),
-       CanonHostInfo::NEUTRAL, -1, ""},
+       CanonHostInfo::BROKEN, -1, ""},
       // Other types of space (no-break, zero-width, zero-width-no-break) are
       // name-prepped away to nothing.
       {nullptr, L"GOO\x200b\x2060\xfeffgoo.com", "googoo.com", Component(0, 10),
@@ -397,14 +474,14 @@ TEST_P(URLCanonHostTest, Host) {
        "ball.de",
        L"fu\x00df"
        L"ball.de",
-       use_idna_non_transitional ? "xn--fuball-cta.de" : "fussball.de",
-       use_idna_non_transitional ? Component(0, 17) : Component(0, 11),
+       "xn--fuball-cta.de",
+       Component(0, 17),
        CanonHostInfo::NEUTRAL, -1, ""},
 
       // Final-sigma (U+03C3) was mapped to regular sigma (U+03C2).
       // Previously, it'd be "xn--wxaikc9b".
       {"\xcf\x83\xcf\x8c\xce\xbb\xce\xbf\xcf\x82", L"\x3c3\x3cc\x3bb\x3bf\x3c2",
-       use_idna_non_transitional ? "xn--wxaijb9b" : "xn--wxaikc6b",
+       "xn--wxaijb9b",
        Component(0, 12), CanonHostInfo::NEUTRAL, -1, ""},
 
       // ZWNJ (U+200C) and ZWJ (U+200D) are mapped away in UTS 46 transitional
@@ -415,8 +492,8 @@ TEST_P(URLCanonHostTest, Host) {
        L"a\x200c"
        L"b\x200d"
        L"c",
-       use_idna_non_transitional ? "xn--abc-9m0ag" : "abc",
-       use_idna_non_transitional ? Component(0, 13) : Component(0, 3),
+       "xn--abc-9m0ag",
+       Component(0, 13),
        CanonHostInfo::NEUTRAL, -1, ""},
 
       // ZWJ between Devanagari characters was still mapped away in UTS 46
@@ -424,8 +501,8 @@ TEST_P(URLCanonHostTest, Host) {
       // Previously "xn--11bo0m".
       {"\xe0\xa4\x95\xe0\xa5\x8d\xe2\x80\x8d\xe0\xa4\x9c",
        L"\x915\x94d\x200d\x91c",
-       use_idna_non_transitional ? "xn--11bo0mv54g" : "xn--11bo0m",
-       use_idna_non_transitional ? Component(0, 14) : Component(0, 10),
+       "xn--11bo0mv54g",
+       Component(0, 14),
        CanonHostInfo::NEUTRAL, -1, ""},
 
       // Fullwidth exclamation mark is disallowed. UTS 46, table 4, row (b)
@@ -435,13 +512,12 @@ TEST_P(URLCanonHostTest, Host) {
        CanonHostInfo::NEUTRAL, -1, ""},
       // U+2132 (turned capital F) is disallowed. UTS 46, table 4, row (c)
       // Allowed in IDNA 2003, but the mapping changed after Unicode 3.2
-      {"\xe2\x84\xb2oo", L"\x2132oo", "%E2%84%B2oo", Component(0, 11),
-       CanonHostInfo::BROKEN, -1, ""},
+      {"\xe2\x84\xb2oo", L"\x2132oo", "xn--oo-3tu", Component(0, 10),
+       CanonHostInfo::NEUTRAL, -1, ""},
       // U+2F868 (CJK Comp) is disallowed. UTS 46, table 4, row (d)
       // Allowed in IDNA 2003, but the mapping changed after Unicode 3.2
       {"\xf0\xaf\xa1\xa8\xe5\xa7\xbb.cn", L"\xd87e\xdc68\x59fb.cn",
-       "%F0%AF%A1%A8%E5%A7%BB.cn", Component(0, 24), CanonHostInfo::BROKEN, -1,
-       ""},
+       "xn--snl080h.cn", Component(0, 14), CanonHostInfo::NEUTRAL, -1, ""},
       // Maps uppercase letters to lower case letters. UTS 46 table 4 row (e)
       {"M\xc3\x9cNCHEN", L"M\xdcNCHEN", "xn--mnchen-3ya", Component(0, 14),
        CanonHostInfo::NEUTRAL, -1, ""},
@@ -549,9 +625,9 @@ TEST_P(URLCanonHostTest, Host) {
        L"%3g%78%63%30%2e%30%32%35%30%2E.01", "%253gxc0.0250..01",
        Component(0, 17), CanonHostInfo::BROKEN, -1, ""},
       // Something that isn't exactly an IP should get treated as a host and
-      // spaces escaped.
+      // spaces treated as invalid.
       {"192.168.0.1 hello", L"192.168.0.1 hello", "192.168.0.1%20hello",
-       Component(0, 19), CanonHostInfo::NEUTRAL, -1, ""},
+       Component(0, 19), CanonHostInfo::BROKEN, -1, ""},
       // Fullwidth and escaped UTF-8 fullwidth should still be treated as IP.
       // These are "0Xc0.0250.01" in fullwidth.
       {"\xef\xbc\x90%Ef%bc\xb8%ef%Bd%83\xef\xbc\x90%EF%BC%"
@@ -598,15 +674,15 @@ TEST_P(URLCanonHostTest, Host) {
   for (const auto& host_case : host_cases) {
     // Narrow version.
     if (host_case.input8) {
-      int host_len = static_cast<int>(strlen(host_case.input8));
+      std::string_view input8(host_case.input8);
+      int host_len = static_cast<int>(input8.length());
       Component in_comp(0, host_len);
       Component out_comp;
 
       out_str.clear();
       StdStringCanonOutput output(&out_str);
 
-      bool success =
-          CanonicalizeHost(host_case.input8, in_comp, &output, &out_comp);
+      bool success = CanonicalizeHost(input8, in_comp, &output, &out_comp);
       output.Complete();
 
       EXPECT_EQ(host_case.expected_family != CanonHostInfo::BROKEN, success)
@@ -630,8 +706,7 @@ TEST_P(URLCanonHostTest, Host) {
       out_str.clear();
       StdStringCanonOutput output(&out_str);
 
-      bool success = CanonicalizeHost(input16.c_str(), in_comp, &output,
-                                      &out_comp);
+      bool success = CanonicalizeHost(input16, in_comp, &output, &out_comp);
       output.Complete();
 
       EXPECT_EQ(host_case.expected_family != CanonHostInfo::BROKEN, success);
@@ -645,24 +720,23 @@ TEST_P(URLCanonHostTest, Host) {
   for (const auto& host_case : host_cases) {
     // Narrow version.
     if (host_case.input8) {
-      int host_len = static_cast<int>(strlen(host_case.input8));
+      std::string_view input8(host_case.input8);
+      int host_len = static_cast<int>(input8.length());
       Component in_comp(0, host_len);
 
       out_str.clear();
       StdStringCanonOutput output(&out_str);
       CanonHostInfo host_info;
 
-      CanonicalizeHostVerbose(host_case.input8, in_comp, &output, &host_info);
+      CanonicalizeHostVerbose(input8, in_comp, &output, &host_info);
       output.Complete();
 
       EXPECT_EQ(host_case.expected_family, host_info.family);
       EXPECT_EQ(host_case.expected, out_str);
       EXPECT_EQ(host_case.expected_component.begin, host_info.out_host.begin);
       EXPECT_EQ(host_case.expected_component.len, host_info.out_host.len);
-      EXPECT_EQ(
-          host_case.expected_address_hex,
-          gurl_base::HexEncode(host_info.address,
-                          static_cast<size_t>(host_info.AddressLength())));
+      EXPECT_EQ(host_case.expected_address_hex,
+                gurl_base::HexEncode(host_info.AddressSpan()));
       if (host_case.expected_family == CanonHostInfo::IPV4) {
         EXPECT_EQ(host_case.expected_num_ipv4_components,
                   host_info.num_ipv4_components);
@@ -680,17 +754,15 @@ TEST_P(URLCanonHostTest, Host) {
       StdStringCanonOutput output(&out_str);
       CanonHostInfo host_info;
 
-      CanonicalizeHostVerbose(input16.c_str(), in_comp, &output, &host_info);
+      CanonicalizeHostVerbose(input16, in_comp, &output, &host_info);
       output.Complete();
 
       EXPECT_EQ(host_case.expected_family, host_info.family);
       EXPECT_EQ(host_case.expected, out_str);
       EXPECT_EQ(host_case.expected_component.begin, host_info.out_host.begin);
       EXPECT_EQ(host_case.expected_component.len, host_info.out_host.len);
-      EXPECT_EQ(
-          host_case.expected_address_hex,
-          gurl_base::HexEncode(host_info.address,
-                          static_cast<size_t>(host_info.AddressLength())));
+      EXPECT_EQ(host_case.expected_address_hex,
+                gurl_base::HexEncode(host_info.AddressSpan()));
       if (host_case.expected_family == CanonHostInfo::IPV4) {
         EXPECT_EQ(host_case.expected_num_ipv4_components,
                   host_info.num_ipv4_components);
@@ -699,15 +771,14 @@ TEST_P(URLCanonHostTest, Host) {
   }
 }
 
-TEST(URLCanonTest, HostPuncutationChar) {
+TEST_F(URLCanonTest, SpecialHostPuncutationChar) {
   // '%' is not tested here. '%' is used for percent-escaping.
-  const std::string_view allowed_host_chars[] = {
-      "!", "\"", "$", "&", "'", "(", ")", "+", ",",
-      "-", ".",  ";", "=", "_", "`", "{", "}", "~",
-  };
+  const std::string_view allowed_host_chars[] = {"!", "\"", "$", "&", "'", "(",
+                                                 ")", "+",  ",", "-", ".", ";",
+                                                 "=", "_",  "`", "{", "}", "~"};
 
   const std::string_view forbidden_host_chars[] = {
-      "#", "/", ":", "<", ">", "?", "@", "[", "\\", "]", "^", "|",
+      " ", "#", "/", ":", "<", ">", "?", "@", "[", "\\", "]", "^", "|",
   };
 
   // Standard non-compliant characters which are escaped. See
@@ -715,14 +786,14 @@ TEST(URLCanonTest, HostPuncutationChar) {
   struct EscapedCharTestCase {
     std::string_view input;
     std::string_view expected;
-  } escaped_host_chars[] = {{" ", "%20"}, {"*", "%2A"}};
+  } escaped_host_chars[] = {{"*", "%2A"}};
 
   for (const std::string_view input : allowed_host_chars) {
     std::string out_str;
     Component in_comp(0, input.size());
     Component out_comp;
     StdStringCanonOutput output(&out_str);
-    bool success = CanonicalizeHost(input.data(), in_comp, &output, &out_comp);
+    bool success = CanonicalizeSpecialHost(input, in_comp, output, out_comp);
     EXPECT_TRUE(success) << "Input: " << input;
     output.Complete();
     EXPECT_EQ(out_str, input) << "Input: " << input;
@@ -733,7 +804,7 @@ TEST(URLCanonTest, HostPuncutationChar) {
     Component in_comp(0, input.size());
     Component out_comp;
     StdStringCanonOutput output(&out_str);
-    EXPECT_FALSE(CanonicalizeHost(input.data(), in_comp, &output, &out_comp))
+    EXPECT_FALSE(CanonicalizeSpecialHost(input, in_comp, output, out_comp))
         << "Input: " << input;
   }
 
@@ -742,15 +813,44 @@ TEST(URLCanonTest, HostPuncutationChar) {
     Component in_comp(0, c.input.size());
     Component out_comp;
     StdStringCanonOutput output(&out_str);
-    bool success =
-        CanonicalizeHost(c.input.data(), in_comp, &output, &out_comp);
+    bool success = CanonicalizeSpecialHost(c.input, in_comp, output, out_comp);
     EXPECT_TRUE(success) << "Input: " << c.input;
     output.Complete();
     EXPECT_EQ(out_str, c.expected) << "Input: " << c.input;
   }
 }
 
-TEST(URLCanonTest, IPv4) {
+TEST_F(URLCanonTest, ForbiddenHostCodePoint) {
+  // Test only CanonicalizeNonSpecialHost.
+  // CanonicalizeSpecialHost is not standard compliant yet.
+  // See URLCanonTest::SpecialHostPuncutationChar.
+
+  // https://url.spec.whatwg.org/#forbidden-host-code-point
+  const std::string_view forbidden_host_chars[] = {
+      "\x09", "\x0A", "\x0D", " ", "#",  "/", ":", "<",
+      ">",    "?",    "@",    "[", "\\", "]", "^", "|",
+  };
+
+  for (const std::string_view input : forbidden_host_chars) {
+    std::string out_str;
+    Component in_comp(0, input.size());
+    Component out_comp;
+    StdStringCanonOutput output(&out_str);
+    EXPECT_FALSE(CanonicalizeNonSpecialHost(input, in_comp, output, out_comp))
+        << "Input: " << input;
+  }
+
+  // Test NULL manually.
+  const char host_with_null[] = "a\0b";
+  std::string out_str;
+  Component in_comp(0, 3);
+  Component out_comp;
+  StdStringCanonOutput output(&out_str);
+  EXPECT_FALSE(CanonicalizeNonSpecialHost(std::string_view(host_with_null, 3u),
+                                          in_comp, output, out_comp));
+}
+
+TEST_F(URLCanonTest, IPv4) {
   // clang-format off
   IPAddressCase cases[] = {
     // Empty is not an IP address.
@@ -859,18 +959,15 @@ TEST(URLCanonTest, IPv4) {
     SCOPED_TRACE(test_case.input8);
 
     // 8-bit version.
-    Component component(0, static_cast<int>(strlen(test_case.input8)));
-
     std::string out_str1;
     StdStringCanonOutput output1(&out_str1);
     CanonHostInfo host_info;
-    CanonicalizeIPAddress(test_case.input8, component, &output1, &host_info);
+    CanonicalizeIPAddress(test_case.input8, &output1, &host_info);
     output1.Complete();
 
     EXPECT_EQ(test_case.expected_family, host_info.family);
     EXPECT_EQ(test_case.expected_address_hex,
-              gurl_base::HexEncode(host_info.address,
-                              static_cast<size_t>(host_info.AddressLength())));
+              gurl_base::HexEncode(host_info.AddressSpan()));
     if (host_info.family == CanonHostInfo::IPV4) {
       EXPECT_STREQ(test_case.expected, out_str1.c_str());
       EXPECT_EQ(test_case.expected_component.begin, host_info.out_host.begin);
@@ -882,17 +979,15 @@ TEST(URLCanonTest, IPv4) {
     // 16-bit version.
     std::u16string input16(
         test_utils::TruncateWStringToUTF16(test_case.input16));
-    component = Component(0, static_cast<int>(input16.length()));
 
     std::string out_str2;
     StdStringCanonOutput output2(&out_str2);
-    CanonicalizeIPAddress(input16.c_str(), component, &output2, &host_info);
+    CanonicalizeIPAddress(input16, &output2, &host_info);
     output2.Complete();
 
     EXPECT_EQ(test_case.expected_family, host_info.family);
     EXPECT_EQ(test_case.expected_address_hex,
-              gurl_base::HexEncode(host_info.address,
-                              static_cast<size_t>(host_info.AddressLength())));
+              gurl_base::HexEncode(host_info.AddressSpan()));
     if (host_info.family == CanonHostInfo::IPV4) {
       EXPECT_STREQ(test_case.expected, out_str2.c_str());
       EXPECT_EQ(test_case.expected_component.begin, host_info.out_host.begin);
@@ -903,8 +998,8 @@ TEST(URLCanonTest, IPv4) {
   }
 }
 
-TEST(URLCanonTest, IPv6) {
-  IPAddressCase cases[] = {
+TEST_F(URLCanonTest, IPv6) {
+  auto cases = std::to_array<IPAddressCase>({
       // Empty is not an IP address.
       {"", L"", "", Component(), CanonHostInfo::NEUTRAL, -1, ""},
       // Non-IPs with [:] characters are marked BROKEN.
@@ -1059,22 +1154,19 @@ TEST(URLCanonTest, IPv6) {
       // Spaces should be rejected.
       {"[::1 hello]", L"[::1 hello]", "", Component(), CanonHostInfo::BROKEN,
        -1, ""},
-  };
+  });
 
   for (size_t i = 0; i < std::size(cases); i++) {
     // 8-bit version.
-    Component component(0, static_cast<int>(strlen(cases[i].input8)));
-
     std::string out_str1;
     StdStringCanonOutput output1(&out_str1);
     CanonHostInfo host_info;
-    CanonicalizeIPAddress(cases[i].input8, component, &output1, &host_info);
+    CanonicalizeIPAddress(cases[i].input8, &output1, &host_info);
     output1.Complete();
 
     EXPECT_EQ(cases[i].expected_family, host_info.family);
     EXPECT_EQ(cases[i].expected_address_hex,
-              gurl_base::HexEncode(host_info.address,
-                              static_cast<size_t>(host_info.AddressLength())))
+              gurl_base::HexEncode(host_info.AddressSpan()))
         << "iter " << i << " host " << cases[i].input8;
     if (host_info.family == CanonHostInfo::IPV6) {
       EXPECT_STREQ(cases[i].expected, out_str1.c_str());
@@ -1086,17 +1178,15 @@ TEST(URLCanonTest, IPv6) {
     // 16-bit version.
     std::u16string input16(
         test_utils::TruncateWStringToUTF16(cases[i].input16));
-    component = Component(0, static_cast<int>(input16.length()));
 
     std::string out_str2;
     StdStringCanonOutput output2(&out_str2);
-    CanonicalizeIPAddress(input16.c_str(), component, &output2, &host_info);
+    CanonicalizeIPAddress(input16, &output2, &host_info);
     output2.Complete();
 
     EXPECT_EQ(cases[i].expected_family, host_info.family);
     EXPECT_EQ(cases[i].expected_address_hex,
-              gurl_base::HexEncode(host_info.address,
-                              static_cast<size_t>(host_info.AddressLength())));
+              gurl_base::HexEncode(host_info.AddressSpan()));
     if (host_info.family == CanonHostInfo::IPV6) {
       EXPECT_STREQ(cases[i].expected, out_str2.c_str());
       EXPECT_EQ(cases[i].expected_component.begin, host_info.out_host.begin);
@@ -1105,30 +1195,28 @@ TEST(URLCanonTest, IPv6) {
   }
 }
 
-TEST(URLCanonTest, IPEmpty) {
+TEST_F(URLCanonTest, IPEmpty) {
   std::string out_str1;
   StdStringCanonOutput output1(&out_str1);
   CanonHostInfo host_info;
 
   // This tests tests.
-  const char spec[] = "192.168.0.1";
-  CanonicalizeIPAddress(spec, Component(), &output1, &host_info);
+  CanonicalizeIPAddress(std::string_view(), &output1, &host_info);
   EXPECT_FALSE(host_info.IsIPAddress());
 
-  CanonicalizeIPAddress(spec, Component(0, 0), &output1, &host_info);
+  CanonicalizeIPAddress("", &output1, &host_info);
   EXPECT_FALSE(host_info.IsIPAddress());
 }
 
 // Verifies that CanonicalizeHostSubstring produces the expected output and
 // does not "fix" IP addresses. Because this code is a subset of
 // CanonicalizeHost, the shared functionality is not tested.
-TEST(URLCanonTest, CanonicalizeHostSubstring) {
+TEST_F(URLCanonTest, CanonicalizeHostSubstring) {
   // Basic sanity check.
   {
     std::string out_str;
     StdStringCanonOutput output(&out_str);
-    EXPECT_TRUE(CanonicalizeHostSubstring("M\xc3\x9cNCHEN.com",
-                                          Component(0, 12), &output));
+    EXPECT_TRUE(CanonicalizeHostSubstring("M\xc3\x9cNCHEN.com", &output));
     output.Complete();
     EXPECT_EQ("xn--mnchen-3ya.com", out_str);
   }
@@ -1138,8 +1226,7 @@ TEST(URLCanonTest, CanonicalizeHostSubstring) {
     std::string out_str;
     StdStringCanonOutput output(&out_str);
     EXPECT_FALSE(CanonicalizeHostSubstring(
-        test_utils::TruncateWStringToUTF16(L"\xfdd0zyx.com").c_str(),
-        Component(0, 8), &output));
+        test_utils::TruncateWStringToUTF16(L"\xfdd0zyx.com"), &output));
     output.Complete();
     EXPECT_EQ("%EF%B7%90zyx.com", out_str);
   }
@@ -1148,7 +1235,7 @@ TEST(URLCanonTest, CanonicalizeHostSubstring) {
   {
     std::string out_str;
     StdStringCanonOutput output(&out_str);
-    EXPECT_TRUE(CanonicalizeHostSubstring("", Component(0, 0), &output));
+    EXPECT_TRUE(CanonicalizeHostSubstring("", &output));
     output.Complete();
     EXPECT_EQ(std::string(), out_str);
   }
@@ -1157,14 +1244,13 @@ TEST(URLCanonTest, CanonicalizeHostSubstring) {
   {
     std::string out_str;
     StdStringCanonOutput output(&out_str);
-    EXPECT_TRUE(
-        CanonicalizeHostSubstring("01.02.03.04", Component(0, 11), &output));
+    EXPECT_TRUE(CanonicalizeHostSubstring("01.02.03.04", &output));
     output.Complete();
     EXPECT_EQ("01.02.03.04", out_str);
   }
 }
 
-TEST(URLCanonTest, UserInfo) {
+TEST_F(URLCanonTest, UserInfo) {
   // Note that the canonicalizer should escape and treat empty components as
   // not being there.
 
@@ -1191,16 +1277,15 @@ TEST(URLCanonTest, UserInfo) {
   };
 
   for (const auto& user_info_case : user_info_cases) {
-    int url_len = static_cast<int>(strlen(user_info_case.input));
-    Parsed parsed;
-    ParseStandardURL(user_info_case.input, url_len, &parsed);
+    Parsed parsed = ParseStandardUrl(user_info_case.input);
     Component out_user, out_pass;
     std::string out_str;
     StdStringCanonOutput output1(&out_str);
 
-    bool success = CanonicalizeUserInfo(user_info_case.input, parsed.username,
-                                        user_info_case.input, parsed.password,
-                                        &output1, &out_user, &out_pass);
+    bool success = CanonicalizeUserInfo(
+        parsed.username.maybe_as_string_view_on(user_info_case.input),
+        parsed.password.maybe_as_string_view_on(user_info_case.input), &output1,
+        &out_user, &out_pass);
     output1.Complete();
 
     EXPECT_EQ(user_info_case.expected_success, success);
@@ -1214,13 +1299,9 @@ TEST(URLCanonTest, UserInfo) {
     out_str.clear();
     StdStringCanonOutput output2(&out_str);
     std::u16string wide_input(gurl_base::UTF8ToUTF16(user_info_case.input));
-    success = CanonicalizeUserInfo(wide_input.c_str(),
-                                   parsed.username,
-                                   wide_input.c_str(),
-                                   parsed.password,
-                                   &output2,
-                                   &out_user,
-                                   &out_pass);
+    success = CanonicalizeUserInfo(parsed.username.MaybeAsViewOn(wide_input),
+                                   parsed.password.MaybeAsViewOn(wide_input),
+                                   &output2, &out_user, &out_pass);
     output2.Complete();
 
     EXPECT_EQ(user_info_case.expected_success, success);
@@ -1232,7 +1313,7 @@ TEST(URLCanonTest, UserInfo) {
   }
 }
 
-TEST(URLCanonTest, Port) {
+TEST_F(URLCanonTest, Port) {
   // We only need to test that the number gets properly put into the output
   // buffer. The parser unit tests will test scanning the number correctly.
   //
@@ -1256,13 +1337,11 @@ TEST(URLCanonTest, Port) {
   };
 
   for (const auto& port_case : port_cases) {
-    int url_len = static_cast<int>(strlen(port_case.input));
-    Component in_comp(0, url_len);
     Component out_comp;
     std::string out_str;
     StdStringCanonOutput output1(&out_str);
-    bool success = CanonicalizePort(
-        port_case.input, in_comp, port_case.default_port, &output1, &out_comp);
+    bool success = CanonicalizePort(port_case.input, port_case.default_port,
+                                    &output1, &out_comp);
     output1.Complete();
 
     EXPECT_EQ(port_case.expected_success, success);
@@ -1274,8 +1353,8 @@ TEST(URLCanonTest, Port) {
     out_str.clear();
     StdStringCanonOutput output2(&out_str);
     std::u16string wide_input(gurl_base::UTF8ToUTF16(port_case.input));
-    success = CanonicalizePort(wide_input.c_str(), in_comp,
-                               port_case.default_port, &output2, &out_comp);
+    success = CanonicalizePort(wide_input, port_case.default_port, &output2,
+                               &out_comp);
     output2.Complete();
 
     EXPECT_EQ(port_case.expected_success, success);
@@ -1341,8 +1420,6 @@ DualComponentCase kCommonPathCases[] = {
      true},
     // Funny characters that are unescaped should be escaped
     {"/foo\tbar", L"/foo\tbar", "/foo%09bar", Component(0, 10), true},
-    // Backslashes should get converted to forward slashes
-    {"\\foo\\bar", L"\\foo\\bar", "/foo/bar", Component(0, 8), true},
     // Hashes found in paths (possibly only when the caller explicitly sets
     // the path on an already-parsed URL) should be escaped.
     {"/foo#bar", L"/foo#bar", "/foo%23bar", Component(0, 10), true},
@@ -1377,31 +1454,29 @@ DualComponentCase kCommonPathCases[] = {
     {nullptr, L"/\xfdd0zyx", "/%EF%B7%90zyx", Component(0, 13), true},
 };
 
-typedef bool (*CanonFunc8Bit)(const char*,
-                              const Component&,
-                              CanonOutput*,
-                              Component*);
-typedef bool (*CanonFunc16Bit)(const char16_t*,
-                               const Component&,
+using CanonFunc8Bit = bool (*)(std::optional<std::string_view>,
                                CanonOutput*,
                                Component*);
-
-void DoPathTest(const DualComponentCase* path_cases,
-                size_t num_cases,
+using CanonFunc16Bit = bool (*)(std::optional<std::u16string_view>,
+                                CanonOutput*,
+                                Component*);
+void DoPathTest(gurl_base::span<const DualComponentCase> path_cases,
+                size_t spanification_suspected_redundant_num_cases,
                 CanonFunc8Bit canon_func_8,
                 CanonFunc16Bit canon_func_16) {
-  for (size_t i = 0; i < num_cases; i++) {
+  // TODO(crbug.com/431824301): Remove unneeded parameter once validated to be
+  // redundant in M143.
+  GURL_CHECK(spanification_suspected_redundant_num_cases == path_cases.size(),
+        gurl_base::NotFatalUntil::M143);
+  for (size_t i = 0; i < spanification_suspected_redundant_num_cases; i++) {
     testing::Message scope_message;
     scope_message << path_cases[i].input8 << "," << path_cases[i].input16;
     SCOPED_TRACE(scope_message);
     if (path_cases[i].input8) {
-      int len = static_cast<int>(strlen(path_cases[i].input8));
-      Component in_comp(0, len);
       Component out_comp;
       std::string out_str;
       StdStringCanonOutput output(&out_str);
-      bool success =
-          canon_func_8(path_cases[i].input8, in_comp, &output, &out_comp);
+      bool success = canon_func_8(path_cases[i].input8, &output, &out_comp);
       output.Complete();
 
       EXPECT_EQ(path_cases[i].expected_success, success);
@@ -1413,14 +1488,11 @@ void DoPathTest(const DualComponentCase* path_cases,
     if (path_cases[i].input16) {
       std::u16string input16(
           test_utils::TruncateWStringToUTF16(path_cases[i].input16));
-      int len = static_cast<int>(input16.length());
-      Component in_comp(0, len);
       Component out_comp;
       std::string out_str;
       StdStringCanonOutput output(&out_str);
 
-      bool success =
-          canon_func_16(input16.c_str(), in_comp, &output, &out_comp);
+      bool success = canon_func_16(input16, &output, &out_comp);
       output.Complete();
 
       EXPECT_EQ(path_cases[i].expected_success, success);
@@ -1431,37 +1503,68 @@ void DoPathTest(const DualComponentCase* path_cases,
   }
 }
 
-TEST(URLCanonTest, Path) {
-  DoPathTest(kCommonPathCases, std::size(kCommonPathCases), CanonicalizePath,
-             CanonicalizePath);
+TEST_F(URLCanonTest, SpecialPath) {
+  // Common test cases
+  DoPathTest(kCommonPathCases, std::size(kCommonPathCases),
+             CanonicalizeSpecialPath, CanonicalizeSpecialPath);
 
   // Manual test: embedded NULLs should be escaped and the URL should be marked
   // as valid.
   const char path_with_null[] = "/ab\0c";
-  Component in_comp(0, 5);
   Component out_comp;
 
   std::string out_str;
   StdStringCanonOutput output(&out_str);
-  bool success = CanonicalizePath(path_with_null, in_comp, &output, &out_comp);
+  bool success = CanonicalizeSpecialPath(
+      gurl_base::MakeStringViewWithNulChars(path_with_null), &output, &out_comp);
   output.Complete();
   EXPECT_TRUE(success);
   EXPECT_EQ("/ab%00c", out_str);
+
+  // Test cases specific on special URLs.
+  DualComponentCase special_path_cases[] = {
+      // Canonical path for empty path is a slash.
+      {"", L"", "/", Component(0, 1), true},
+      // Backslashes should be used as path separators.
+      {"\\a\\b", L"\\a\\b", "/a/b", Component(0, 4), true},
+      {"/a\\..\\b", L"/a\\..\\b", "/b", Component(0, 2), true},
+      {"/a\\.\\b", L"/a\\.\\b", "/a/b", Component(0, 4), true},
+  };
+
+  DoPathTest(special_path_cases, std::size(special_path_cases),
+             CanonicalizeSpecialPath, CanonicalizeSpecialPath);
 }
 
-TEST(URLCanonTest, PartialPath) {
+TEST_F(URLCanonTest, NonSpecialPath) {
+  // Common test cases
+  DoPathTest(kCommonPathCases, std::size(kCommonPathCases),
+             CanonicalizeNonSpecialPath, CanonicalizeNonSpecialPath);
+
+  // Test cases specific on non-special URLs.
+  DualComponentCase non_special_path_cases[] = {
+      // Empty.
+      {"", L"", "", Component(0, 0), true},
+      // Backslashes.
+      {"/a\\..\\b", L"/a\\..\\b", "/a\\..\\b", Component(0, 7), true},
+      {"/a\\./b", L"/a\\./b", "/a\\./b", Component(0, 6), true},
+  };
+
+  DoPathTest(non_special_path_cases, std::size(non_special_path_cases),
+             CanonicalizeNonSpecialPath, CanonicalizeNonSpecialPath);
+}
+
+TEST_F(URLCanonTest, PartialPath) {
   DualComponentCase partial_path_cases[] = {
       {".html", L".html", ".html", Component(0, 5), true},
       {"", L"", "", Component(0, 0), true},
   };
-
   DoPathTest(kCommonPathCases, std::size(kCommonPathCases),
              CanonicalizePartialPath, CanonicalizePartialPath);
   DoPathTest(partial_path_cases, std::size(partial_path_cases),
              CanonicalizePartialPath, CanonicalizePartialPath);
 }
 
-TEST(URLCanonTest, Query) {
+TEST_F(URLCanonTest, Query) {
   struct QueryCase {
     const char* input8;
     const wchar_t* input16;
@@ -1496,8 +1599,8 @@ TEST(URLCanonTest, Query) {
       std::string out_str;
 
       StdStringCanonOutput output(&out_str);
-      CanonicalizeQuery(query_case.input8, in_comp, nullptr, &output,
-                        &out_comp);
+      CanonicalizeQuery(in_comp.as_string_view_on(query_case.input8), nullptr,
+                        &output, &out_comp);
       output.Complete();
 
       EXPECT_EQ(query_case.expected, out_str);
@@ -1511,7 +1614,7 @@ TEST(URLCanonTest, Query) {
       std::string out_str;
 
       StdStringCanonOutput output(&out_str);
-      CanonicalizeQuery(input16.c_str(), in_comp, nullptr, &output, &out_comp);
+      CanonicalizeQuery(in_comp.AsViewOn(input16), nullptr, &output, &out_comp);
       output.Complete();
 
       EXPECT_EQ(query_case.expected, out_str);
@@ -1522,13 +1625,13 @@ TEST(URLCanonTest, Query) {
   std::string out_str;
   StdStringCanonOutput output(&out_str);
   Component out_comp;
-  CanonicalizeQuery("a \x00z\x01", Component(0, 5), nullptr, &output,
-                    &out_comp);
+  CanonicalizeQuery(gurl_base::MakeStringViewWithNulChars("a \x00z\x01"), nullptr,
+                    &output, &out_comp);
   output.Complete();
   EXPECT_EQ("?a%20%00z%01", out_str);
 }
 
-TEST(URLCanonTest, Ref) {
+TEST_F(URLCanonTest, Ref) {
   // Refs are trivial, it just checks the encoding.
   DualComponentCase ref_cases[] = {
       {"hello!", L"hello!", "#hello!", Component(1, 6), true},
@@ -1569,7 +1672,8 @@ TEST(URLCanonTest, Ref) {
 
       std::string out_str;
       StdStringCanonOutput output(&out_str);
-      CanonicalizeRef(ref_case.input8, in_comp, &output, &out_comp);
+      CanonicalizeRef(in_comp.maybe_as_string_view_on(ref_case.input8), &output,
+                      &out_comp);
       output.Complete();
 
       EXPECT_EQ(ref_case.expected_component.begin, out_comp.begin);
@@ -1587,7 +1691,7 @@ TEST(URLCanonTest, Ref) {
 
       std::string out_str;
       StdStringCanonOutput output(&out_str);
-      CanonicalizeRef(input16.c_str(), in_comp, &output, &out_comp);
+      CanonicalizeRef(in_comp.MaybeAsViewOn(input16), &output, &out_comp);
       output.Complete();
 
       EXPECT_EQ(ref_case.expected_component.begin, out_comp.begin);
@@ -1603,7 +1707,8 @@ TEST(URLCanonTest, Ref) {
 
   std::string out_str;
   StdStringCanonOutput output(&out_str);
-  CanonicalizeRef(null_input, null_input_component, &output, &out_comp);
+  CanonicalizeRef(null_input_component.as_string_view_on(null_input), &output,
+                  &out_comp);
   output.Complete();
 
   EXPECT_EQ(1, out_comp.begin);
@@ -1611,7 +1716,7 @@ TEST(URLCanonTest, Ref) {
   EXPECT_EQ("#ab%00z", out_str);
 }
 
-TEST(URLCanonTest, CanonicalizeStandardURL) {
+TEST_F(URLCanonTest, CanonicalizeStandardUrl) {
   // The individual component canonicalize tests should have caught the cases
   // for each of those components. Here, we just need to test that the various
   // parts are included or excluded properly, and have the correct separators.
@@ -1667,16 +1772,14 @@ TEST(URLCanonTest, CanonicalizeStandardURL) {
   // clang-format on
 
   for (const auto& i : cases) {
-    int url_len = static_cast<int>(strlen(i.input));
-    Parsed parsed;
-    ParseStandardURL(i.input, url_len, &parsed);
+    Parsed parsed = ParseStandardUrl(i.input);
 
     Parsed out_parsed;
     std::string out_str;
     StdStringCanonOutput output(&out_str);
-    bool success = CanonicalizeStandardURL(
-        i.input, url_len, parsed, SCHEME_WITH_HOST_PORT_AND_USER_INFORMATION,
-        nullptr, &output, &out_parsed);
+    bool success = CanonicalizeStandardUrl(
+        i.input, parsed, SCHEME_WITH_HOST_PORT_AND_USER_INFORMATION, nullptr,
+        &output, &out_parsed);
     output.Complete();
 
     EXPECT_EQ(i.expected_success, success);
@@ -1684,9 +1787,138 @@ TEST(URLCanonTest, CanonicalizeStandardURL) {
   }
 }
 
+TEST_F(URLCanonTest, CanonicalizeNonSpecialUrl) {
+  // The individual component canonicalize tests should have caught the cases
+  // for each of those components. Here, we just need to test that the various
+  // parts are included or excluded properly, and have the correct separators.
+  struct URLCase {
+    const std::string_view input;
+    const std::string_view expected;
+    bool expected_success;
+  } cases[] = {
+      // Basic cases.
+      {"git://host:80/path?a=b#ref", "git://host:80/path?a=b#ref", true},
+      {"git://host", "git://host", true},
+      {"git://host/", "git://host/", true},
+      {"git://HosT/", "git://HosT/", true},
+      {"git://..", "git://..", true},
+      {"git://../", "git://../", true},
+      {"git://../..", "git://../", true},
+
+      // Empty hosts.
+      {"git://", "git://", true},
+      {"git:///", "git:///", true},
+      {"git:////", "git:////", true},
+      {"git:///a", "git:///a", true},
+      {"git:///a/../b", "git:///b", true},
+      {"git:///..", "git:///", true},
+
+      // No hosts.
+      {"git:/", "git:/", true},
+      {"git:/a", "git:/a", true},
+      {"git:/a/../b", "git:/b", true},
+      {"git:/..", "git:/", true},
+      {"git:/../", "git:/", true},
+      {"git:/../..", "git:/", true},
+      {"git:/.//a", "git:/.//a", true},
+
+      // Users.
+      {"git://@host", "git://host", true},
+      {"git:// @host", "git://%20@host", true},
+      {"git://\\@host", "git://%5C@host", true},
+
+      // Paths.
+      {"git://host/path", "git://host/path", true},
+      {"git://host/p ath", "git://host/p%20ath", true},
+      {"git://host/a/../b", "git://host/b", true},
+      {"git://host/..", "git://host/", true},
+      {"git://host/../", "git://host/", true},
+      {"git://host/../..", "git://host/", true},
+      {"git://host/.", "git://host/", true},
+      {"git://host/./", "git://host/", true},
+      {"git://host/./.", "git://host/", true},
+      // Backslashes.
+      {"git://host/a\\..\\b", "git://host/a\\..\\b", true},
+
+      // IPv6.
+      {"git://[1:2:0:0:5:0:0:0]", "git://[1:2:0:0:5::]", true},
+      {"git://[1:2:0:0:5:0:0:0]/", "git://[1:2:0:0:5::]/", true},
+      {"git://[1:2:0:0:5:0:0:0]/path", "git://[1:2:0:0:5::]/path", true},
+
+      // IPv4 is unsupported.
+      {"git://127.00.0.1", "git://127.00.0.1", true},
+      {"git://127.1000.0.1", "git://127.1000.0.1", true},
+
+      // Invalid URLs.
+      {"git://@", "git://", false},
+      // Forbidden host code points.
+      {"git://<", "git://", false},
+      {"git:// /", "git:///", false},
+      // Backslashes cannot be used as host terminators.
+      {"git://host\\a/../b", "git://host/b", false},
+
+      // Opaque paths.
+      {"git:", "git:", true},
+      {"git:opaque", "git:opaque", true},
+      {"git:o p a q u e", "git:o p a q u e", true},
+      {"git: <", "git: <", true},
+      {"git:opaque/a/../b", "git:opaque/a/../b", true},
+      {"git:opaque\\a\\..\\b", "git:opaque\\a\\..\\b", true},
+      {"git:\\a", "git:\\a", true},
+      // Like URNs.
+      {"git:a:b:c:123", "git:a:b:c:123", true},
+  };
+
+  for (const auto& i : cases) {
+    SCOPED_TRACE(i.input);
+    Parsed parsed = ParseNonSpecialUrl(i.input);
+    Parsed out_parsed;
+    std::string out_str;
+    StdStringCanonOutput output(&out_str);
+    bool success = CanonicalizeNonSpecialUrl(i.input, parsed,
+                                             /*query_converter=*/nullptr,
+                                             output, out_parsed);
+    output.Complete();
+    EXPECT_EQ(success, i.expected_success);
+    EXPECT_EQ(out_str, i.expected);
+  }
+}
+
+TEST_F(URLCanonTest, CanonicalizeNonSpecialUrlOutputParsed) {
+  // Test that out_parsed is correctly set.
+  struct URLCase {
+    const std::string_view input;
+    // Currently, test only host and length.
+    Component expected_output_parsed_host;
+    int expected_output_parsed_length;
+  } cases[] = {
+      {"git:", Component(), 4},
+      {"git:opaque", Component(), 10},
+      {"git:/", Component(), 5},
+      {"git://", Component(6, 0), 6},
+      {"git:///", Component(6, 0), 7},
+      // The length of "[1:2:0:0:5::]" is 13.
+      {"git://[1:2:0:0:5:0:0:0]/", Component(6, 13), 20},
+  };
+
+  for (const auto& i : cases) {
+    SCOPED_TRACE(i.input);
+    Parsed parsed = ParseNonSpecialUrl(i.input);
+    Parsed out_parsed;
+    std::string unused_out_str;
+    StdStringCanonOutput unused_output(&unused_out_str);
+    bool success = CanonicalizeNonSpecialUrl(i.input, parsed,
+                                             /*query_converter=*/nullptr,
+                                             unused_output, out_parsed);
+    ASSERT_TRUE(success);
+    EXPECT_EQ(out_parsed.host, i.expected_output_parsed_host);
+    EXPECT_EQ(out_parsed.Length(), i.expected_output_parsed_length);
+  }
+}
+
 // The codepath here is the same as for regular canonicalization, so we just
 // need to test that things are replaced or not correctly.
-TEST(URLCanonTest, ReplaceStandardURL) {
+TEST_F(URLCanonTest, ReplaceStandardUrl) {
   ReplaceCase replace_cases[] = {
       // Common case of truncating the path.
       {"http://www.google.com/foo?bar=baz#ref", nullptr, nullptr, nullptr,
@@ -1709,9 +1941,7 @@ TEST(URLCanonTest, ReplaceStandardURL) {
 
   for (const auto& replace_case : replace_cases) {
     const ReplaceCase& cur = replace_case;
-    int base_len = static_cast<int>(strlen(cur.base));
-    Parsed parsed;
-    ParseStandardURL(cur.base, base_len, &parsed);
+    Parsed parsed = ParseStandardUrl(cur.base);
 
     Replacements<char> r;
     typedef Replacements<char> R;  // Clean up syntax.
@@ -1730,7 +1960,7 @@ TEST(URLCanonTest, ReplaceStandardURL) {
     std::string out_str;
     StdStringCanonOutput output(&out_str);
     Parsed out_parsed;
-    ReplaceStandardURL(replace_case.base, parsed, r,
+    ReplaceStandardUrl(replace_case.base, parsed, r,
                        SCHEME_WITH_HOST_PORT_AND_USER_INFORMATION, nullptr,
                        &output, &out_parsed);
     output.Complete();
@@ -1741,10 +1971,7 @@ TEST(URLCanonTest, ReplaceStandardURL) {
   // The path pointer should be ignored if the address is invalid.
   {
     const char src[] = "http://www.google.com/here_is_the_path";
-    int src_len = static_cast<int>(strlen(src));
-
-    Parsed parsed;
-    ParseStandardURL(src, src_len, &parsed);
+    Parsed parsed = ParseStandardUrl(src);
 
     // Replace the path to 0 length string. By using 1 as the string address,
     // the test should get an access violation if it tries to dereference it.
@@ -1753,7 +1980,7 @@ TEST(URLCanonTest, ReplaceStandardURL) {
     std::string out_str1;
     StdStringCanonOutput output1(&out_str1);
     Parsed new_parsed;
-    ReplaceStandardURL(src, parsed, r,
+    ReplaceStandardUrl(src, parsed, r,
                        SCHEME_WITH_HOST_PORT_AND_USER_INFORMATION, nullptr,
                        &output1, &new_parsed);
     output1.Complete();
@@ -1763,7 +1990,7 @@ TEST(URLCanonTest, ReplaceStandardURL) {
     r.SetPath(reinterpret_cast<char*>(0x00000001), Component());
     std::string out_str2;
     StdStringCanonOutput output2(&out_str2);
-    ReplaceStandardURL(src, parsed, r,
+    ReplaceStandardUrl(src, parsed, r,
                        SCHEME_WITH_HOST_PORT_AND_USER_INFORMATION, nullptr,
                        &output2, &new_parsed);
     output2.Complete();
@@ -1771,7 +1998,7 @@ TEST(URLCanonTest, ReplaceStandardURL) {
   }
 }
 
-TEST(URLCanonTest, ReplaceFileURL) {
+TEST_F(URLCanonTest, ReplaceFileUrl) {
   ReplaceCase replace_cases[] = {
       // Replace everything
       {"file:///C:/gaba?query#ref", nullptr, nullptr, nullptr, "filer", nullptr,
@@ -1810,9 +2037,7 @@ TEST(URLCanonTest, ReplaceFileURL) {
   for (const auto& replace_case : replace_cases) {
     const ReplaceCase& cur = replace_case;
     SCOPED_TRACE(cur.base);
-    int base_len = static_cast<int>(strlen(cur.base));
-    Parsed parsed;
-    ParseFileURL(cur.base, base_len, &parsed);
+    Parsed parsed = ParseFileUrl(cur.base);
 
     Replacements<char> r;
     typedef Replacements<char> R;  // Clean up syntax.
@@ -1828,14 +2053,14 @@ TEST(URLCanonTest, ReplaceFileURL) {
     std::string out_str;
     StdStringCanonOutput output(&out_str);
     Parsed out_parsed;
-    ReplaceFileURL(cur.base, parsed, r, nullptr, &output, &out_parsed);
+    ReplaceFileUrl(cur.base, parsed, r, nullptr, &output, &out_parsed);
     output.Complete();
 
     EXPECT_EQ(replace_case.expected, out_str);
   }
 }
 
-TEST(URLCanonTest, ReplaceFileSystemURL) {
+TEST_F(URLCanonTest, ReplaceFileSystemUrl) {
   ReplaceCase replace_cases[] = {
       // Replace everything in the outer URL.
       {"filesystem:file:///temporary/gaba?query#ref", nullptr, nullptr, nullptr,
@@ -1878,9 +2103,7 @@ TEST(URLCanonTest, ReplaceFileSystemURL) {
 
   for (const auto& replace_case : replace_cases) {
     const ReplaceCase& cur = replace_case;
-    int base_len = static_cast<int>(strlen(cur.base));
-    Parsed parsed;
-    ParseFileSystemURL(cur.base, base_len, &parsed);
+    Parsed parsed = ParseFileSystemUrl(cur.base);
 
     Replacements<char> r;
     typedef Replacements<char> R;  // Clean up syntax.
@@ -1896,14 +2119,14 @@ TEST(URLCanonTest, ReplaceFileSystemURL) {
     std::string out_str;
     StdStringCanonOutput output(&out_str);
     Parsed out_parsed;
-    ReplaceFileSystemURL(cur.base, parsed, r, nullptr, &output, &out_parsed);
+    ReplaceFileSystemUrl(cur.base, parsed, r, nullptr, &output, &out_parsed);
     output.Complete();
 
     EXPECT_EQ(replace_case.expected, out_str);
   }
 }
 
-TEST(URLCanonTest, ReplacePathURL) {
+TEST_F(URLCanonTest, ReplacePathUrl) {
   ReplaceCase replace_cases[] = {
       // Replace everything
       {"data:foo", "javascript", nullptr, nullptr, nullptr, nullptr,
@@ -1922,9 +2145,6 @@ TEST(URLCanonTest, ReplacePathURL) {
 
   for (const auto& replace_case : replace_cases) {
     const ReplaceCase& cur = replace_case;
-    int base_len = static_cast<int>(strlen(cur.base));
-    Parsed parsed;
-    ParsePathURL(cur.base, base_len, false, &parsed);
 
     Replacements<char> r;
     typedef Replacements<char> R;  // Clean up syntax.
@@ -1940,14 +2160,15 @@ TEST(URLCanonTest, ReplacePathURL) {
     std::string out_str;
     StdStringCanonOutput output(&out_str);
     Parsed out_parsed;
-    ReplacePathURL(cur.base, parsed, r, &output, &out_parsed);
+    ReplacePathUrl(cur.base, ParsePathUrl(cur.base, false), r, &output,
+                   &out_parsed);
     output.Complete();
 
     EXPECT_EQ(replace_case.expected, out_str);
   }
 }
 
-TEST(URLCanonTest, ReplaceMailtoURL) {
+TEST_F(URLCanonTest, ReplaceMailtoUrl) {
   ReplaceCase replace_cases[] = {
       // Replace everything
       {"mailto:jon@foo.com?body=sup", "mailto", nullptr, nullptr, nullptr,
@@ -1983,9 +2204,7 @@ TEST(URLCanonTest, ReplaceMailtoURL) {
 
   for (const auto& replace_case : replace_cases) {
     const ReplaceCase& cur = replace_case;
-    int base_len = static_cast<int>(strlen(cur.base));
-    Parsed parsed;
-    ParseMailtoURL(cur.base, base_len, &parsed);
+    Parsed parsed = ParseMailtoUrl(cur.base);
 
     Replacements<char> r;
     typedef Replacements<char> R;
@@ -2001,14 +2220,14 @@ TEST(URLCanonTest, ReplaceMailtoURL) {
     std::string out_str;
     StdStringCanonOutput output(&out_str);
     Parsed out_parsed;
-    ReplaceMailtoURL(cur.base, parsed, r, &output, &out_parsed);
+    ReplaceMailtoUrl(cur.base, parsed, r, &output, &out_parsed);
     output.Complete();
 
     EXPECT_EQ(replace_case.expected, out_str);
   }
 }
 
-TEST(URLCanonTest, CanonicalizeFileURL) {
+TEST_F(URLCanonTest, CanonicalizeFileUrl) {
   struct URLCase {
     const char* input;
     const char* expected;
@@ -2095,15 +2314,13 @@ TEST(URLCanonTest, CanonicalizeFileURL) {
   };
 
   for (const auto& i : cases) {
-    int url_len = static_cast<int>(strlen(i.input));
-    Parsed parsed;
-    ParseFileURL(i.input, url_len, &parsed);
+    Parsed parsed = ParseFileUrl(i.input);
 
     Parsed out_parsed;
     std::string out_str;
     StdStringCanonOutput output(&out_str);
-    bool success = CanonicalizeFileURL(i.input, url_len, parsed, nullptr,
-                                       &output, &out_parsed);
+    bool success =
+        CanonicalizeFileUrl(i.input, parsed, nullptr, &output, &out_parsed);
     output.Complete();
 
     EXPECT_EQ(i.expected_success, success);
@@ -2122,7 +2339,7 @@ TEST(URLCanonTest, CanonicalizeFileURL) {
   }
 }
 
-TEST(URLCanonTest, CanonicalizeFileSystemURL) {
+TEST_F(URLCanonTest, CanonicalizeFileSystemUrl) {
   struct URLCase {
     const char* input;
     const char* expected;
@@ -2144,15 +2361,13 @@ TEST(URLCanonTest, CanonicalizeFileSystemURL) {
   };
 
   for (const auto& i : cases) {
-    int url_len = static_cast<int>(strlen(i.input));
-    Parsed parsed;
-    ParseFileSystemURL(i.input, url_len, &parsed);
+    Parsed parsed = ParseFileSystemUrl(i.input);
 
     Parsed out_parsed;
     std::string out_str;
     StdStringCanonOutput output(&out_str);
-    bool success = CanonicalizeFileSystemURL(i.input, url_len, parsed, nullptr,
-                                             &output, &out_parsed);
+    bool success = CanonicalizeFileSystemUrl(i.input, parsed, nullptr, &output,
+                                             &out_parsed);
     output.Complete();
 
     EXPECT_EQ(i.expected_success, success);
@@ -2167,7 +2382,7 @@ TEST(URLCanonTest, CanonicalizeFileSystemURL) {
   }
 }
 
-TEST(URLCanonTest, CanonicalizePathURL) {
+TEST_F(URLCanonTest, CanonicalizePathUrl) {
   // Path URLs should get canonicalized schemes but nothing else.
   struct PathCase {
     const char* input;
@@ -2184,13 +2399,12 @@ TEST(URLCanonTest, CanonicalizePathURL) {
 
   for (const auto& path_case : path_cases) {
     int url_len = static_cast<int>(strlen(path_case.input));
-    Parsed parsed;
-    ParsePathURL(path_case.input, url_len, true, &parsed);
 
     Parsed out_parsed;
     std::string out_str;
     StdStringCanonOutput output(&out_str);
-    bool success = CanonicalizePathURL(path_case.input, url_len, parsed,
+    bool success = CanonicalizePathUrl(path_case.input,
+                                       ParsePathUrl(path_case.input, true),
                                        &output, &out_parsed);
     output.Complete();
 
@@ -2208,7 +2422,7 @@ TEST(URLCanonTest, CanonicalizePathURL) {
   }
 }
 
-TEST(URLCanonTest, CanonicalizePathURLPath) {
+TEST_F(URLCanonTest, CanonicalizePathUrlPath) {
   struct PathCase {
     std::string input;
     std::wstring input16;
@@ -2225,9 +2439,7 @@ TEST(URLCanonTest, CanonicalizePathURLPath) {
     std::string out_str;
     StdStringCanonOutput output(&out_str);
     url::Component out_component;
-    CanonicalizePathURLPath(path_case.input.data(),
-                            Component(0, path_case.input.size()), &output,
-                            &out_component);
+    CanonicalizePathUrlPath(path_case.input, &output, &out_component);
     output.Complete();
 
     EXPECT_EQ(path_case.expected, out_str);
@@ -2242,9 +2454,7 @@ TEST(URLCanonTest, CanonicalizePathURLPath) {
     url::Component out_component16;
     std::u16string input16(
         test_utils::TruncateWStringToUTF16(path_case.input16.data()));
-    CanonicalizePathURLPath(input16.c_str(),
-                            Component(0, path_case.input16.size()), &output16,
-                            &out_component16);
+    CanonicalizePathUrlPath(input16, &output16, &out_component16);
     output16.Complete();
 
     EXPECT_EQ(path_case.expected, out_str16);
@@ -2255,78 +2465,68 @@ TEST(URLCanonTest, CanonicalizePathURLPath) {
   }
 }
 
-TEST(URLCanonTest, CanonicalizeMailtoURL) {
+TEST_F(URLCanonTest, CanonicalizeMailtoUrl) {
   struct URLCase {
     const char* input;
     const char* expected;
     bool expected_success;
     Component expected_path;
     Component expected_query;
-  } cases[] = {
-    // Null character should be escaped to %00.
-    // Keep this test first in the list as it is handled specially below.
-    {"mailto:addr1\0addr2?foo",
-     "mailto:addr1%00addr2?foo",
-     true, Component(7, 13), Component(21, 3)},
-    {"mailto:addr1",
-     "mailto:addr1",
-     true, Component(7, 5), Component()},
-    {"mailto:addr1@foo.com",
-     "mailto:addr1@foo.com",
-     true, Component(7, 13), Component()},
-    // Trailing whitespace is stripped.
-    {"MaIlTo:addr1 \t ",
-     "mailto:addr1",
-     true, Component(7, 5), Component()},
-    {"MaIlTo:addr1?to=jon",
-     "mailto:addr1?to=jon",
-     true, Component(7, 5), Component(13,6)},
-    {"mailto:addr1,addr2",
-     "mailto:addr1,addr2",
-     true, Component(7, 11), Component()},
-    // Embedded spaces must be encoded.
-    {"mailto:addr1, addr2",
-     "mailto:addr1,%20addr2",
-     true, Component(7, 14), Component()},
-    {"mailto:addr1, addr2?subject=one two ",
-     "mailto:addr1,%20addr2?subject=one%20two",
-     true, Component(7, 14), Component(22, 17)},
-    {"mailto:addr1%2caddr2",
-     "mailto:addr1%2caddr2",
-     true, Component(7, 13), Component()},
-    {"mailto:\xF0\x90\x8C\x80",
-     "mailto:%F0%90%8C%80",
-     true, Component(7, 12), Component()},
-    // Invalid -- UTF-8 encoded surrogate value.
-    {"mailto:\xed\xa0\x80",
-     "mailto:%EF%BF%BD%EF%BF%BD%EF%BF%BD",
-     false, Component(7, 27), Component()},
-    {"mailto:addr1?",
-     "mailto:addr1?",
-     true, Component(7, 5), Component(13, 0)},
-    // Certain characters have special meanings and must be encoded.
-    {"mailto:! \x22$&()+,-./09:;<=>@AZ[\\]&_`az{|}~\x7f?Query! \x22$&()+,-./09:;<=>@AZ[\\]&_`az{|}~",
-     "mailto:!%20%22$&()+,-./09:;%3C=%3E@AZ[\\]&_%60az%7B%7C%7D~%7F?Query!%20%22$&()+,-./09:;%3C=%3E@AZ[\\]&_`az{|}~",
-     true, Component(7, 53), Component(61, 47)},
   };
+  auto cases = std::to_array<URLCase>({
+      // Null character should be escaped to %00.
+      // Keep this test first in the list as it is handled specially below.
+      {"mailto:addr1\0addr2?foo", "mailto:addr1%00addr2?foo", true,
+       Component(7, 13), Component(21, 3)},
+      {"mailto:addr1", "mailto:addr1", true, Component(7, 5), Component()},
+      {"mailto:addr1@foo.com", "mailto:addr1@foo.com", true, Component(7, 13),
+       Component()},
+      // Trailing whitespace is stripped.
+      {"MaIlTo:addr1 \t ", "mailto:addr1", true, Component(7, 5), Component()},
+      {"MaIlTo:addr1?to=jon", "mailto:addr1?to=jon", true, Component(7, 5),
+       Component(13, 6)},
+      {"mailto:addr1,addr2", "mailto:addr1,addr2", true, Component(7, 11),
+       Component()},
+      // Embedded spaces must be encoded.
+      {"mailto:addr1, addr2", "mailto:addr1,%20addr2", true, Component(7, 14),
+       Component()},
+      {"mailto:addr1, addr2?subject=one two ",
+       "mailto:addr1,%20addr2?subject=one%20two", true, Component(7, 14),
+       Component(22, 17)},
+      {"mailto:addr1%2caddr2", "mailto:addr1%2caddr2", true, Component(7, 13),
+       Component()},
+      {"mailto:\xF0\x90\x8C\x80", "mailto:%F0%90%8C%80", true, Component(7, 12),
+       Component()},
+      // Invalid -- UTF-8 encoded surrogate value.
+      {"mailto:\xed\xa0\x80", "mailto:%EF%BF%BD%EF%BF%BD%EF%BF%BD", false,
+       Component(7, 27), Component()},
+      {"mailto:addr1?", "mailto:addr1?", true, Component(7, 5),
+       Component(13, 0)},
+      // Certain characters have special meanings and must be encoded.
+      {"mailto:! \x22$&()+,-./09:;<=>@AZ[\\]&_`az{|}~\x7f?Query! "
+       "\x22$&()+,-./09:;<=>@AZ[\\]&_`az{|}~",
+       "mailto:!%20%22$&()+,-./"
+       "09:;%3C=%3E@AZ[\\]&_%60az%7B%7C%7D~%7F?Query!%20%22$&()+,-./"
+       "09:;%3C=%3E@AZ[\\]&_`az{|}~",
+       true, Component(7, 53), Component(61, 47)},
+  });
 
   // Define outside of loop to catch bugs where components aren't reset
-  Parsed parsed;
   Parsed out_parsed;
 
   for (size_t i = 0; i < std::size(cases); i++) {
-    int url_len = static_cast<int>(strlen(cases[i].input));
+    size_t url_len = strlen(cases[i].input);
     if (i == 0) {
       // The first test case purposely has a '\0' in it -- don't count it
       // as the string terminator.
       url_len = 22;
     }
-    ParseMailtoURL(cases[i].input, url_len, &parsed);
 
+    std::string_view input(cases[i].input, url_len);
     std::string out_str;
     StdStringCanonOutput output(&out_str);
-    bool success = CanonicalizeMailtoURL(cases[i].input, url_len, parsed,
-                                         &output, &out_parsed);
+    bool success = CanonicalizeMailtoUrl(input, ParseMailtoUrl(input), &output,
+                                         &out_parsed);
     output.Complete();
 
     EXPECT_EQ(cases[i].expected_success, success);
@@ -2346,7 +2546,7 @@ TEST(URLCanonTest, CanonicalizeMailtoURL) {
 
 #ifndef WIN32
 
-TEST(URLCanonTest, _itoa_s) {
+TEST_F(URLCanonTest, _itoa_s) {
   // We fill the buffer with 0xff to ensure that it's getting properly
   // null-terminated. We also allocate one byte more than what we tell
   // _itoa_s about, and ensure that the extra byte is untouched.
@@ -2385,40 +2585,6 @@ TEST(URLCanonTest, _itoa_s) {
   EXPECT_EQ('\xFF', buf[5]);
 }
 
-TEST(URLCanonTest, _itow_s) {
-  // We fill the buffer with 0xff to ensure that it's getting properly
-  // null-terminated. We also allocate one byte more than what we tell
-  // _itoa_s about, and ensure that the extra byte is untouched.
-  char16_t buf[6];
-  const char fill_mem = 0xff;
-  const char16_t fill_char = 0xffff;
-  memset(buf, fill_mem, sizeof(buf));
-  EXPECT_EQ(0, _itow_s(12, buf, sizeof(buf) / 2 - 1, 10));
-  EXPECT_EQ(u"12", std::u16string(buf));
-  EXPECT_EQ(fill_char, buf[3]);
-
-  // Test the edge cases - exactly the buffer size and one over
-  EXPECT_EQ(0, _itow_s(1234, buf, sizeof(buf) / 2 - 1, 10));
-  EXPECT_EQ(u"1234", std::u16string(buf));
-  EXPECT_EQ(fill_char, buf[5]);
-
-  memset(buf, fill_mem, sizeof(buf));
-  EXPECT_EQ(EINVAL, _itow_s(12345, buf, sizeof(buf) / 2 - 1, 10));
-  EXPECT_EQ(fill_char, buf[5]);  // should never write to this location
-
-  // Test the template overload (note that this will see the full buffer)
-  memset(buf, fill_mem, sizeof(buf));
-  EXPECT_EQ(0, _itow_s(12, buf, 10));
-  EXPECT_EQ(u"12", std::u16string(buf));
-  EXPECT_EQ(fill_char, buf[3]);
-
-  memset(buf, fill_mem, sizeof(buf));
-  EXPECT_EQ(0, _itow_s(12345, buf, 10));
-  EXPECT_EQ(u"12345", std::u16string(buf));
-
-  EXPECT_EQ(EINVAL, _itow_s(123456, buf, 10));
-}
-
 #endif  // !WIN32
 
 // Returns true if the given two structures are the same.
@@ -2433,7 +2599,7 @@ static bool ParsedIsEqual(const Parsed& a, const Parsed& b) {
          a.ref.begin == b.ref.begin && a.ref.len == b.ref.len;
 }
 
-TEST(URLCanonTest, ResolveRelativeURL) {
+TEST_F(URLCanonTest, ResolveRelativeUrl) {
   struct RelativeCase {
     const char* base;      // Input base URL: MUST BE CANONICAL
     bool is_base_hier;     // Is the base URL hierarchical
@@ -2649,21 +2815,19 @@ TEST(URLCanonTest, ResolveRelativeURL) {
 
   for (const auto& cur_case : rel_cases) {
     Parsed parsed;
-    int base_len = static_cast<int>(strlen(cur_case.base));
     if (cur_case.is_base_file)
-      ParseFileURL(cur_case.base, base_len, &parsed);
+      parsed = ParseFileUrl(cur_case.base);
     else if (cur_case.is_base_hier)
-      ParseStandardURL(cur_case.base, base_len, &parsed);
+      parsed = ParseStandardUrl(cur_case.base);
     else
-      ParsePathURL(cur_case.base, base_len, false, &parsed);
+      parsed = ParsePathUrl(cur_case.base, false);
 
     // First see if it is relative.
-    int test_len = static_cast<int>(strlen(cur_case.test));
     bool is_relative;
     Component relative_component;
-    bool succeed_is_rel = IsRelativeURL(
-        cur_case.base, parsed, cur_case.test, test_len, cur_case.is_base_hier,
-        &is_relative, &relative_component);
+    bool succeed_is_rel =
+        IsRelativeUrl(cur_case.base, parsed, cur_case.test,
+                      cur_case.is_base_hier, &is_relative, &relative_component);
 
     EXPECT_EQ(cur_case.succeed_relative, succeed_is_rel) <<
         "succeed is rel failure on " << cur_case.test;
@@ -2675,7 +2839,7 @@ TEST(URLCanonTest, ResolveRelativeURL) {
       StdStringCanonOutput output(&resolved);
       Parsed resolved_parsed;
 
-      bool succeed_resolve = ResolveRelativeURL(
+      bool succeed_resolve = ResolveRelativeUrl(
           cur_case.base, parsed, cur_case.is_base_file, cur_case.test,
           relative_component, nullptr, &output, &resolved_parsed);
       output.Complete();
@@ -2686,16 +2850,24 @@ TEST(URLCanonTest, ResolveRelativeURL) {
       // Verify that the output parsed structure is the same as parsing a
       // the URL freshly.
       Parsed ref_parsed;
-      int resolved_len = static_cast<int>(resolved.size());
       if (cur_case.is_base_file) {
-        ParseFileURL(resolved.c_str(), resolved_len, &ref_parsed);
+        ref_parsed = ParseFileUrl(resolved);
       } else if (cur_case.is_base_hier) {
-        ParseStandardURL(resolved.c_str(), resolved_len, &ref_parsed);
+        ref_parsed = ParseStandardUrl(resolved);
       } else {
-        ParsePathURL(resolved.c_str(), resolved_len, false, &ref_parsed);
+        ref_parsed = ParsePathUrl(resolved, false);
       }
       EXPECT_TRUE(ParsedIsEqual(ref_parsed, resolved_parsed));
     }
+  }
+}
+
+TEST_F(URLCanonTest, NonSpecialResolveRelativeUrl) {
+  static constexpr ResolveRelativeURLCase cases[] = {
+      {"git://host", "path", true, true, true, true, "git://host/path"},
+  };
+  for (const auto& i : cases) {
+    TestNonSpecialResolveRelativeURL(i);
   }
 }
 
@@ -2703,11 +2875,9 @@ TEST(URLCanonTest, ResolveRelativeURL) {
 // UTF-16 characters, we would get invalid data in the URL. This is because the
 // buffer that it used to hold the UTF-8 data was resized, while some pointers
 // were still kept to the old buffer that was removed.
-TEST(URLCanonTest, ReplacementOverflow) {
+TEST_F(URLCanonTest, ReplacementOverflow) {
   const char src[] = "file:///C:/foo/bar";
-  int src_len = static_cast<int>(strlen(src));
-  Parsed parsed;
-  ParseFileURL(src, src_len, &parsed);
+  Parsed parsed = ParseFileUrl(src);
 
   // Override two components, the path with something short, and the query with
   // something long enough to trigger the bug.
@@ -2727,7 +2897,7 @@ TEST(URLCanonTest, ReplacementOverflow) {
   Parsed repl_parsed;
   std::string repl_str;
   StdStringCanonOutput repl_output(&repl_str);
-  ReplaceFileURL(src, parsed, repl, nullptr, &repl_output, &repl_parsed);
+  ReplaceFileUrl(src, parsed, repl, nullptr, &repl_output, &repl_parsed);
   repl_output.Complete();
 
   // Generate the expected string and check.
@@ -2737,7 +2907,7 @@ TEST(URLCanonTest, ReplacementOverflow) {
   EXPECT_TRUE(expected == repl_str);
 }
 
-TEST(URLCanonTest, DefaultPortForScheme) {
+TEST_F(URLCanonTest, DefaultPortForScheme) {
   struct TestCases {
     const char* scheme;
     const int expected_port;
@@ -2758,11 +2928,12 @@ TEST(URLCanonTest, DefaultPortForScheme) {
   for (const auto& test_case : cases) {
     SCOPED_TRACE(test_case.scheme);
     EXPECT_EQ(test_case.expected_port,
-              DefaultPortForScheme(test_case.scheme, strlen(test_case.scheme)));
+              DefaultPortForScheme(std::string_view(test_case.scheme,
+                                                    strlen(test_case.scheme))));
   }
 }
 
-TEST(URLCanonTest, FindWindowsDriveLetter) {
+TEST_F(URLCanonTest, FindWindowsDriveLetter) {
   struct TestCase {
     std::string_view spec;
     int begin;
@@ -2803,7 +2974,7 @@ TEST(URLCanonTest, FindWindowsDriveLetter) {
   }
 }
 
-TEST(URLCanonTest, IDNToASCII) {
+TEST_F(URLCanonTest, IDNToASCII) {
   RawCanonOutputW<1024> output;
 
   // Basic ASCII test.
@@ -2852,6 +3023,177 @@ TEST(URLCanonTest, IDNToASCII) {
   str = u"xn--1⁄4";
   EXPECT_FALSE(IDNToASCII(str, &output));
   output.set_length(0);
+}
+
+void ComponentCaseMatches(bool success,
+                          std::string_view out_str,
+                          const Component& out_comp,
+                          const DualComponentCase& expected) {
+  EXPECT_EQ(success, expected.expected_success);
+  EXPECT_STREQ(out_str.data(), expected.expected);
+  EXPECT_EQ(out_comp, expected.expected_component);
+}
+
+TEST_F(URLCanonTest, OpaqueHost) {
+  DualComponentCase host_cases[] = {
+      {"", L"", "", Component(), true},
+      {"google.com", L"google.com", "google.com", Component(0, 10), true},
+      // Upper case letters should be preserved.
+      {"gooGle.com", L"gooGle.com", "gooGle.com", Component(0, 10), true},
+      {"\x41", L"\x41", "A", Component(0, 1), true},
+      {"\x61", L"\x61", "a", Component(0, 1), true},
+      // Percent encode.
+      {"\x10", L"\x10", "%10", Component(0, 3), true},
+      // A valid percent encoding should be preserved.
+      {"%41", L"%41", "%41", Component(0, 3), true},
+      // An invalid percent encoding should be preserved too.
+      {"%zz", L"%zz", "%zz", Component(0, 3), true},
+      // UTF-16 HIRAGANA LETTER A (codepoint U+3042, "\xe3\x81\x82" in UTF-8).
+      {"\xe3\x81\x82", L"\x3042", "%E3%81%82", Component(0, 9), true},
+  };
+
+  for (const auto& host_case : host_cases) {
+    SCOPED_TRACE(testing::Message() << "url: \"" << host_case.input8 << "\"");
+    std::string_view input8(host_case.input8);
+    std::string out_str;
+    StdStringCanonOutput output(&out_str);
+    Component out_comp;
+    bool success = CanonicalizeNonSpecialHost(
+        input8, Component(0, static_cast<int>(input8.length())), output,
+        out_comp);
+    output.Complete();
+    ComponentCaseMatches(success, out_str, out_comp, host_case);
+  }
+
+  // UTF-16 version.
+  for (const auto& host_case : host_cases) {
+    SCOPED_TRACE(testing::Message() << "url: \"" << host_case.input16 << "\"");
+    std::u16string input16(
+        test_utils::TruncateWStringToUTF16(host_case.input16));
+    std::string out_str;
+    StdStringCanonOutput output(&out_str);
+    Component out_comp;
+    bool success = CanonicalizeNonSpecialHost(
+        input16, Component(0, static_cast<int>(input16.length())), output,
+        out_comp);
+    output.Complete();
+    ComponentCaseMatches(success, out_str, out_comp, host_case);
+  }
+}
+
+void IPAddressCaseMatches(std::string_view out_str,
+                          const CanonHostInfo& host_info,
+                          const IPAddressCase& expected) {
+  EXPECT_EQ(host_info.family, expected.expected_family);
+  EXPECT_STREQ(out_str.data(), expected.expected);
+  EXPECT_EQ(gurl_base::HexEncode(host_info.AddressSpan()),
+            expected.expected_address_hex);
+  if (expected.expected_family == CanonHostInfo::IPV4) {
+    EXPECT_EQ(host_info.num_ipv4_components,
+              expected.expected_num_ipv4_components);
+  }
+}
+
+TEST_F(URLCanonTest, NonSpecialHostIPv6Address) {
+  IPAddressCase ip_address_cases[] = {
+      // Non-special URLs don't support IPv4. Family must be NEUTRAL.
+      {"192.168.0.1", L"192.168.0.1", "192.168.0.1", Component(0, 11),
+       CanonHostInfo::NEUTRAL, 0, ""},
+      {"192", L"192", "192", Component(0, 3), CanonHostInfo::NEUTRAL, 0, ""},
+      // "257" is allowed since the number is not considered as a part of IPv4.
+      {"192.168.0.257", L"192.168.0.257", "192.168.0.257", Component(0, 13),
+       CanonHostInfo::NEUTRAL, 0, ""},
+      // IPv6.
+      {"[1:0:0:2::3:0]", L"[1:0:0:2::3:0]", "[1::2:0:0:3:0]", Component(0, 14),
+       CanonHostInfo::IPV6, -1, "00010000000000020000000000030000"},
+      {"[::]", L"[::]", "[::]", Component(0, 4), CanonHostInfo::IPV6, -1,
+       "00000000000000000000000000000000"},
+      // Invalid hosts.
+      {"#[::]", L"#[::]", "", Component(), CanonHostInfo::BROKEN, -1, ""},
+      {"[]", L"[]", "[]", Component(), CanonHostInfo::BROKEN, -1, ""},
+      {"a]", L"a]", "a]", Component(), CanonHostInfo::BROKEN, -1, ""},
+      {"[a", L"[a", "[a", Component(), CanonHostInfo::BROKEN, -1, ""},
+      {"a[]", L"a[]", "a[]", Component(), CanonHostInfo::BROKEN, -1, ""},
+      {"[]a", L"[]a", "[]a", Component(), CanonHostInfo::BROKEN, -1, ""},
+  };
+
+  for (const auto& ip_address_case : ip_address_cases) {
+    SCOPED_TRACE(testing::Message()
+                 << "url: \"" << ip_address_case.input8 << "\"");
+    std::string_view view8(ip_address_case.input8);
+    std::string out_str;
+    StdStringCanonOutput output(&out_str);
+    CanonHostInfo host_info;
+    CanonicalizeNonSpecialHostVerbose(
+        view8, Component(0, static_cast<int>(view8.length())), output,
+        host_info);
+    output.Complete();
+    IPAddressCaseMatches(out_str, host_info, ip_address_case);
+  }
+
+  // UTF-16 version.
+  for (const auto& ip_address_case : ip_address_cases) {
+    SCOPED_TRACE(testing::Message()
+                 << "url: \"" << ip_address_case.input16 << "\"");
+    std::u16string input16(
+        test_utils::TruncateWStringToUTF16(ip_address_case.input16));
+    std::string out_str;
+    StdStringCanonOutput output(&out_str);
+    CanonHostInfo host_info;
+    CanonicalizeNonSpecialHostVerbose(
+        input16, Component(0, static_cast<int>(input16.length())), output,
+        host_info);
+    output.Complete();
+    IPAddressCaseMatches(out_str, host_info, ip_address_case);
+  }
+}
+
+// Compile-time checks for StringToUint64WithBase function
+static_assert(StringToUint64WithBase("123", 10) == 123u);
+static_assert(StringToUint64WithBase("1A", 16) == 26u);
+
+// Test cases for StringToUint64WithBase function with various bases.
+TEST_F(URLCanonTest, StringToUint64WithBase) {
+  StringToUint64TestCase test_cases[] = {
+      {"1", 10, 1u},
+      {"-1", 10, 0u},
+      {"a", 10, 0u},
+      {"a", 16, 10u},
+      {"123", 10, 123u},
+      {"0", 10, 0u},
+      {"18446744073709551615", 10, 18446744073709551615ULL},  // Max uint64_t
+      {"1A", 16, 26u},
+      {"FF", 16, 255u},
+      {"FFFFFFFFFFFFFFFF", 16, 18446744073709551615ULL},  // Max uint64_t
+      {"10", 8, 8u},
+      {"77", 8, 63u},
+      {"1010", 2, 10u},
+      {"1111", 2, 15u},
+      {"1000000000000000000000000000000000000000000000000000000000000000", 2,
+       9223372036854775808ULL},  // 2^63
+      {"123Z", 10, 123u},        // Stops at 'Z'
+      {"1G", 16, 1u},            // Stops at 'G'
+      {"08", 8, 0u},             // Stops at '8'
+      {"", 10, 0u},              // Empty String
+      {" 1", 10, 0u},            // Doesn't ignore leading spaces.
+      {"+2", 10, 0u},            // Doesn't accept leading '+'.
+      {"0644", 10, 644u},        // Doesn't automatically switch to octal.
+      {"0xFF", 10, 0u},          // Doesn't automatically switch to hex.
+      {"0xFF", 16, 0u},          // Doesn't accept 0x prefix.
+      {"1e10", 10, 1u},          // Doesn't parse floating point.
+      {"eF", 16, 239u},          // Supports mixed case.
+      {"1z", 36, 71u},           // Supports base 36.
+      {"1 001", 10, 1u},         // Stops at spaces.
+      {"1,001", 10, 1u},         // Stops at commas.
+      {"1_001", 10, 1u},         // Stops at underlines.
+      {"1'001", 10, 1u},         // Stops at quote marks.
+      {"1.001", 10, 1u},         // Stops at periods.
+      {"1000000000000000F", 16, 15u}};  // Overflow is discarded.
+
+  for (const auto& test_case : test_cases) {
+    EXPECT_EQ(StringToUint64WithBase(test_case.input, test_case.base),
+              test_case.expected);
+  }
 }
 
 }  // namespace url

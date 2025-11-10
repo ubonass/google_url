@@ -6,6 +6,5 @@
 #define POLYFILLS_BASE_CHECK_OP_H_
 
 #include "polyfills/base/logging.h"
-#include "base/template_util.h"
 
 #endif /* POLYFILLS_BASE_CHECK_OP_H_ */
